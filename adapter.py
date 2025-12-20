@@ -1,6 +1,6 @@
 import os
 import json
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 import litellm
 from dotenv import load_dotenv
 
@@ -104,12 +104,14 @@ def google_to_openai_request(google_req, model):
     google_tools = google_req.get('tools', [])
     for tool in google_tools:
         for func in tool.get('functionDeclarations', []):
+            # Google AI SDK / CLI might send parameters as 'parameters' or 'parametersJsonSchema'
+            params = func.get('parameters') or func.get('parametersJsonSchema')
             tools.append({
                 "type": "function",
                 "function": {
                     "name": func.get('name'),
                     "description": func.get('description'),
-                    "parameters": func.get('parameters') or {"type": "object", "properties": {}}
+                    "parameters": params or {"type": "object", "properties": {}}
                 }
             })
 
@@ -120,7 +122,10 @@ def google_to_openai_request(google_req, model):
         "max_tokens": generation_config.get('maxOutputTokens'),
         "top_p": generation_config.get('topP'),
         "stop": generation_config.get('stopSequences'),
-        "tools": tools if tools else None
+        "presence_penalty": generation_config.get('presencePenalty'),
+        "frequency_penalty": generation_config.get('frequencyPenalty'),
+        "tools": tools if tools else None,
+        "stream_options": {"include_usage": True}
     }
     return {k: v for k, v in openai_req.items() if v is not None}
 
@@ -129,16 +134,52 @@ def openai_to_google_response(openai_resp):
     choices = openai_resp.choices
     candidates = []
     
+    # Map OpenAI finish reasons to Google
+    FINISH_REASON_MAP = {
+        'stop': 'STOP',
+        'length': 'MAX_TOKENS',
+        'content_filter': 'SAFETY',
+        'tool_calls': 'STOP',
+        'function_call': 'STOP'
+    }
+    
     for choice in choices:
         message = choice.message
         content = message.content
         
-        candidate = {
+        # 1. Map Finish Reason
+        openai_finish_reason = getattr(choice, 'finish_reason', 'stop')
+        finish_reason = FINISH_REASON_MAP.get(openai_finish_reason, 'STOP')
+            
+        # 2. Handle Parts (Text + Tool Calls)
+        parts = []
+        if content:
+            parts.append({"text": content})
+            
+        tool_calls = getattr(message, 'tool_calls', [])
+        if tool_calls:
+            for tool_call in tool_calls:
+                try:
+                    args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                except:
+                    args = {}
+                    
+                parts.append({
+                    "functionCall": {
+                        "name": tool_call.function.name,
+                        "args": args
+                    }
+                })
+        
+        if not parts:
+            parts = [{"text": ""}]
+            
+        candidates.append({
             "content": {
-                "parts": [{"text": content} if content else {}],
+                "parts": parts,
                 "role": "model"
             },
-            "finishReason": getattr(choice, 'finish_reason', 'STOP').upper() if getattr(choice, 'finish_reason', None) else 'STOP',
+            "finishReason": finish_reason,
             "index": getattr(choice, 'index', 0),
             "safetyRatings": [
                 {"category": "HARM_CATEGORY_HARASSMENT", "probability": "NEGLIGIBLE"},
@@ -146,30 +187,7 @@ def openai_to_google_response(openai_resp):
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "probability": "NEGLIGIBLE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "probability": "NEGLIGIBLE"}
             ]
-        }
-        
-        # Handle tool calls
-        tool_calls = getattr(message, 'tool_calls', [])
-        if tool_calls:
-            # Clear text part if it's empty/None when tool calls exist
-            if not content:
-                candidate["content"]["parts"] = []
-            
-            for tool_call in tool_calls:
-                try:
-                    args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                except:
-                    args = {}
-                    
-                function_call = {
-                    "functionCall": {
-                        "name": tool_call.function.name,
-                        "args": args
-                    }
-                }
-                candidate["content"]["parts"].append(function_call)
-                
-        candidates.append(candidate)
+        })
     
     # Extract usage
     usage = getattr(openai_resp, 'usage', None)
@@ -180,8 +198,8 @@ def openai_to_google_response(openai_resp):
             "candidatesTokenCount": getattr(usage, 'completion_tokens', 0),
             "totalTokenCount": getattr(usage, 'total_tokens', 0)
         }
-        
-    return {
+    
+    response = {
         "candidates": candidates,
         "usageMetadata": usage_metadata,
         "modelVersion": "gemini-2.0-flash-001",
@@ -194,6 +212,8 @@ def openai_to_google_response(openai_resp):
             ]
         }
     }
+    print(f"DEBUG: Translated Google Response: {json.dumps(response)}")
+    return response
 
 @app.route('/v1beta/models/<path:model>:generateContent', methods=['POST'])
 @app.route('/v1beta/models/<path:model>:streamGenerateContent', methods=['POST'])
@@ -223,47 +243,140 @@ def generate_content(model):
         openai_req = google_to_openai_request(google_req, target_model)
         save_debug_json("openai_request.json", openai_req)
         
+
         # Check if streaming is requested
         is_streaming = 'streamGenerateContent' in request.path or request.args.get('alt') == 'sse'
         
         if is_streaming:
             def generate():
                 try:
-                    print("Starting stream generation...")
+                    print("DEBUG: Starting incremental stream generation...")
                     response = litellm.completion(
                         **openai_req,
                         stream=True
                     )
+                    
+                    accumulated_tool_calls = {}
+                    role_sent = False
+                    
                     for chunk in response:
-                        # Translate chunk to Google format
-                        content = chunk.choices[0].delta.content or ""
+                        # 0. Handle Usage (can be in any chunk, typically the last)
+                        if hasattr(chunk, 'usage') and chunk.usage:
+                            usage = chunk.usage
+                            usage_meta = {
+                                "promptTokenCount": getattr(usage, 'prompt_tokens', 0),
+                                "candidatesTokenCount": getattr(usage, 'completion_tokens', 0),
+                                "totalTokenCount": getattr(usage, 'total_tokens', 0)
+                            }
+                            data_str = f"data: {json.dumps({'usageMetadata': usage_meta})}\n\n"
+                            print(f"DEBUG: Yielding usage chunk: {data_str}")
+                            yield data_str
+
+                        if not chunk.choices:
+                            continue
+                            
+                        delta = chunk.choices[0].delta
+                        finish_reason = getattr(chunk.choices[0], 'finish_reason', None)
                         
-                        google_chunk = {
-                            "candidates": [{
-                                "content": {
-                                    "parts": [{"text": content}],
+                        # 1. Text Content
+                        content = getattr(delta, 'content', None) or ""
+                        if content:
+                            google_chunk = {
+                                "candidates": [{
+                                    "content": {
+                                        "parts": [{"text": content}],
+                                        "role": "model"
+                                    },
+                                    "index": 0
+                                }]
+                            }
+                            data_str = f"data: {json.dumps(google_chunk)}\n\n"
+                            print(f"DEBUG: Yielding text chunk: {data_str[:100]}...")
+                            yield data_str
+                            
+                        # 2. Tool Calls
+                        tool_calls_delta = getattr(delta, 'tool_calls', None)
+                        if tool_calls_delta:
+                            for tc_delta in tool_calls_delta:
+                                idx = tc_delta.index
+                                if idx not in accumulated_tool_calls:
+                                    accumulated_tool_calls[idx] = {
+                                        "name": getattr(tc_delta.function, 'name', None),
+                                        "arguments": ""
+                                    }
+                                if tc_delta.function.arguments:
+                                    accumulated_tool_calls[idx]["arguments"] += tc_delta.function.arguments
+                        
+                        # 3. Handle Finish
+                        if finish_reason:
+                            print(f"DEBUG: Stream finished. Reason: {finish_reason}")
+                            
+                            FINISH_REASON_MAP = {
+                                'stop': 'STOP',
+                                'length': 'MAX_TOKENS',
+                                'content_filter': 'SAFETY',
+                                'tool_calls': 'STOP',
+                                'function_call': 'STOP'
+                            }
+                            finish_reason_upper = FINISH_REASON_MAP.get(finish_reason, 'STOP')
+                            
+                            parts = []
+                            # If we have tool calls, include them
+                            if accumulated_tool_calls:
+                                for idx in sorted(accumulated_tool_calls.keys()):
+                                    tc = accumulated_tool_calls[idx]
+                                    try:
+                                        args = json.loads(tc["arguments"]) if tc["arguments"] else {}
+                                    except:
+                                        args = {}
+                                    parts.append({
+                                        "functionCall": {
+                                            "name": tc["name"],
+                                            "args": args
+                                        }
+                                    })
+                            
+                            # Final terminal chunk 
+                            final_chunk = {
+                                "candidates": [{
+                                    "finishReason": finish_reason_upper,
+                                    "index": 0
+                                }]
+                            }
+                            
+                            # If we have parts (tool calls), insert them into this final chunk
+                            if parts:
+                                final_chunk["candidates"][0]["content"] = {
+                                    "parts": parts,
                                     "role": "model"
-                                },
-                                "finishReason": (chunk.choices[0].finish_reason.upper() if getattr(chunk.choices[0], 'finish_reason', None) else None),
-                                "index": 0
-                            }]
-                        }
-                        yield f"data: {json.dumps(google_chunk)}\n\n"
+                                }
+                                # Log specifically for tool calls
+                                data_str = f"data: {json.dumps(final_chunk)}\n\n"
+                                print(f"DEBUG: Yielding combined tool+stop chunk: {data_str}")
+                                yield data_str
+                            else:
+                                # Just a stop reason
+                                data_str = f"data: {json.dumps(final_chunk)}\n\n"
+                                print(f"DEBUG: Yielding final stop chunk: {data_str}")
+                                yield data_str
+                            
                 except Exception as e:
-                    print(f"Streaming Error: {e}")
-                    # In streaming, we yield one last candidate with the error message
-                    # so the user actually sees it in the CLI
+                    error_msg = f"Adapter Error: {type(e).__name__}: {str(e)}"
+                    print(f"DEBUG: Streaming Error: {error_msg}")
+                    # Try to yield a message to the CLI so it doesn't just hang
                     error_chunk = {
                         "candidates": [{
                             "content": {
-                                "parts": [{"text": f"\n\n❌ Error: {str(e)}"}],
+                                "parts": [{"text": f"\n\n[Error from Adapter]: {error_msg}\n\nThis is often due to provider rate limits or configuration issues."}],
                                 "role": "model"
                             },
                             "finishReason": "OTHER"
                         }]
                     }
                     yield f"data: {json.dumps(error_chunk)}\n\n"
-
+                    error_chunk = {"error": {"code": 500, "message": str(e)}}
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+            
             return app.response_class(generate(), mimetype='text/event-stream')
             
         else:

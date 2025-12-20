@@ -9,6 +9,7 @@ A Flask-based adapter that enables the [Gemini CLI](https://github.com/google-ge
 - ✅ **Robust Translation**: Handles `systemInstruction`, `functionCall`, and `functionResponse`.
 - ✅ **SSE Streaming**: Full support for real-time responses in the CLI.
 - ✅ **MCP / Tool Support**: Use your MCP servers with any provider.
+- ✅ **Protocol Alignment**: Deep mapping for `usageMetadata`, `finishReason`, and penalties (`presence`/`frequency`).
 - ✅ **JSON Logging**: Capture raw and translated requests/responses for debugging.
 - ✅ **Process Management**: Robust script for starting, stopping, and monitoring the adapter.
 
@@ -57,6 +58,10 @@ We've added `GOOGLE_GEMINI_BASE_URL` to the project's `.env` so that whenever yo
 # Test with Groq (Free and fast!)
 gemini prompt "What is the capital of France?" --model "groq/llama-3.3-70b-versatile"
 ```
+
+> [!TIP]
+> Use the `--yolo` flag to automatically approve tool calls and actions:
+> `gemini prompt "Check the weather" --yolo`
 
 ### 6. Run Gemini CLI with diff model
 ```bash
@@ -109,6 +114,10 @@ The adapter performs deep translation of the message history:
     - Translates Google `functionCall` to OpenAI `tool_calls`.
     - Translates Google `functionResponse` to OpenAI `tool` messages.
     - Generates stable `tool_call_id`s to maintain conversation state.
+- **Metadata**:
+    - **Usage**: Maps OpenAI `usage` to Google `usageMetadata` (token counts).
+    - **Finish Reasons**: Maps OpenAI reasons to precise Google enums (`STOP`, `MAX_TOKENS`, `SAFETY`).
+    - **Penalties**: Supports `presencePenalty` and `frequencyPenalty`.
 
 ### Streaming
 Full SSE (Server-Sent Events) support ensures that the Gemini CLI's streaming mode works perfectly with all providers.

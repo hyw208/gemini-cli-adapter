@@ -30,7 +30,8 @@ The adapter translates Google's API format to OpenAI's format (used by LiteLLM) 
 
 ### Phase 3: Reference Data & Refinement (Completed)
 - [x] Capture and save reference JSONs for debugging and verification.
-- [x] Comprehensive documentation of JSON formats.
+- [x] Comprehensive documentation of JSON formats (`api_schemas.md`).
+- [x] Full protocol alignment (Usage, Finish Reasons, Penalties).
 - [x] Enhanced error handling and edge case coverage for tool calling.
 
 ### Phase 4: Advanced Features (Completed)
