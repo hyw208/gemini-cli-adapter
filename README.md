@@ -16,7 +16,7 @@ A Flask-based adapter that enables the [Gemini CLI](https://github.com/google-ge
 
 ```mermaid
 graph LR
-    A[Gemini CLI] --> B[Adapter (Flask)]
+    A[Gemini CLI] --> B["Adapter (Flask)"]
     B --> C[LiteLLM]
     C --> D[Multiple Providers]
     C --> E[Google Gemini]

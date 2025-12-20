@@ -6,7 +6,7 @@ The goal of this project is to enable the [Gemini CLI](https://github.com/google
 ## Architecture
 ```mermaid
 graph LR
-    A[Gemini CLI] --> B[Adapter (Flask)]
+    A[Gemini CLI] --> B["Adapter (Flask)"]
     B --> C[LiteLLM]
     C --> D[Multiple Providers]
     C --> E[Google Gemini]
