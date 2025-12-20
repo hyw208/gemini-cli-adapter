@@ -58,6 +58,17 @@ We've added `GOOGLE_GEMINI_BASE_URL` to the project's `.env` so that whenever yo
 gemini prompt "What is the capital of France?" --model "groq/llama-3.3-70b-versatile"
 ```
 
+### 6. Run Gemini CLI with diff model
+```bash
+gemini --model "groq/llama-3.3-70b-versatile"
+```
+
+### 7. Stop the Adapter
+Use the management script to stop the adapter:
+```bash
+./manage_adapter.sh stop
+```
+
 ## 🤖 Supported Providers & Models
 
 The adapter automatically routes requests based on the model name:

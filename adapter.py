@@ -236,9 +236,7 @@ def generate_content(model):
                     )
                     for chunk in response:
                         # Translate chunk to Google format
-                        # Note: This is a simplified translation for streaming
                         content = chunk.choices[0].delta.content or ""
-                        print(f"Yielding chunk content: {content!r}")
                         
                         google_chunk = {
                             "candidates": [{
@@ -246,37 +244,55 @@ def generate_content(model):
                                     "parts": [{"text": content}],
                                     "role": "model"
                                 },
-                                "finishReason": chunk.choices[0].finish_reason and chunk.choices[0].finish_reason.upper() or None,
+                                "finishReason": (chunk.choices[0].finish_reason.upper() if getattr(chunk.choices[0], 'finish_reason', None) else None),
                                 "index": 0
                             }]
                         }
-                        data_str = f"data: {json.dumps(google_chunk)}\n\n"
-                        yield data_str
+                        yield f"data: {json.dumps(google_chunk)}\n\n"
                 except Exception as e:
                     print(f"Streaming Error: {e}")
-                    error_resp = {"error": {"code": 500, "message": str(e)}}
-                    yield f"data: {json.dumps(error_resp)}\n\n"
+                    # In streaming, we yield one last candidate with the error message
+                    # so the user actually sees it in the CLI
+                    error_chunk = {
+                        "candidates": [{
+                            "content": {
+                                "parts": [{"text": f"\n\n❌ Error: {str(e)}"}],
+                                "role": "model"
+                            },
+                            "finishReason": "OTHER"
+                        }]
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
 
             return app.response_class(generate(), mimetype='text/event-stream')
             
         else:
-            # Non-streaming (Standard)
-            response = litellm.completion(
-                **openai_req
-            )
-            # litellm response can be complex, convert to dict for saving
-            if hasattr(response, 'dict'):
-                save_debug_json("openai_response.json", response.dict())
-            else:
-                save_debug_json("openai_response.json", dict(response))
-                
+            # Non-streaming
+            response = litellm.completion(**openai_req)
+            
+            # Save raw OpenAI response for analysis
+            save_debug_json("openai_response.json", response.model_dump())
+            
             google_resp = openai_to_google_response(response)
             save_debug_json("google_response.json", google_resp)
+            
             return jsonify(google_resp)
             
     except Exception as e:
         print(f"Adapter Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        # Return standard Google API error format
+        status_code = 500
+        if hasattr(e, 'status_code'):
+            status_code = e.status_code
+            
+        error_response = {
+            "error": {
+                "code": status_code,
+                "message": str(e),
+                "status": "INTERNAL"
+            }
+        }
+        return jsonify(error_response), status_code
 
 @app.route('/v1beta/models', methods=['GET'])
 @app.route('/v1/models', methods=['GET'])
