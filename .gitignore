@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Logs and PID
+*.log
+.adapter.pid
+debug_logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
