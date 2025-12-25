@@ -57,6 +57,8 @@ We've added `GOOGLE_GEMINI_BASE_URL` to the project's `.env` so that whenever yo
 ```bash
 # Test with Groq (Free and fast!)
 gemini prompt "What is the capital of France?" --model "groq/llama-3.3-70b-versatile"
+
+gemini prompt "List 3 colors" --model "github/gpt-4o" 
 ```
 
 > [!TIP]
@@ -66,6 +68,8 @@ gemini prompt "What is the capital of France?" --model "groq/llama-3.3-70b-versa
 ### 6. Run Gemini CLI with diff model
 ```bash
 gemini --model "groq/llama-3.3-70b-versatile"
+
+gemini --model "github/gpt-4o"
 ```
 
 ### 7. Stop the Adapter

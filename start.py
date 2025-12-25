@@ -18,7 +18,8 @@ def main():
         "DEEPSEEK_API_KEY", 
         "ANTHROPIC_API_KEY", 
         "GROQ_API_KEY", 
-        "TOGETHER_API_KEY"
+        "TOGETHER_API_KEY",
+        "GITHUB_API_KEY"
     ]
     
     found_keys = [key for key in keys if os.getenv(key)]
@@ -29,6 +30,13 @@ def main():
         sys.exit(1)
         
     print(f"✅ Found API keys for: {', '.join([k.split('_')[0] for k in found_keys])}")
+    
+    # Explicitly set all environment variables so they're available to the adapter
+    # This is needed because os.execv might not preserve all dotenv-loaded variables
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            os.environ[key] = value
     
     # Path to the adapter script
     adapter_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adapter.py")

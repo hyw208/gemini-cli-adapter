@@ -28,6 +28,54 @@ def save_debug_json(filename, data):
             json.dump(data, f, indent=2)
         print(f"DEBUG: Saved {filename}")
 
+def trim_payload_for_small_models(openai_req, model):
+    """
+    Trim request payload for models with small context limits (e.g., GitHub models: 8000 tokens)
+    Returns a trimmed copy of the request.
+    """
+    # Models with small input limits (approximate token limit)
+    SMALL_CONTEXT_MODELS = {
+        'github/': 6000,  # GitHub models have 8000 token limit, leave some margin
+    }
+    
+    # Check if this model needs trimming
+    trim_limit = None
+    for prefix, limit in SMALL_CONTEXT_MODELS.items():
+        if model.startswith(prefix):
+            trim_limit = limit
+            break
+    
+    if not trim_limit:
+        return openai_req  # No trimming needed
+    
+    trimmed_req = openai_req.copy()
+    
+    # 1. Remove or limit tools (MCP tools can be very large)
+    tools = trimmed_req.get('tools', [])
+    if tools:
+        tool_count = len(tools)
+        # Keep only essential tools or remove all if too many
+        if tool_count > 10:
+            print(f"DEBUG: Removing {tool_count} tools for small-context model")
+            trimmed_req['tools'] = None
+        elif tool_count > 5:
+            # Keep only first 5 tools
+            print(f"DEBUG: Trimming tools from {tool_count} to 5 for small-context model")
+            trimmed_req['tools'] = tools[:5]
+    
+    # 2. Trim system message if too long (rough estimate: 4 chars ≈ 1 token)
+    messages = trimmed_req.get('messages', [])
+    if messages and messages[0].get('role') == 'system':
+        system_content = messages[0].get('content', '')
+        estimated_tokens = len(system_content) // 4
+        if estimated_tokens > 2000:
+            # Trim to first 2000 tokens worth
+            trimmed_content = system_content[:8000] + "\n...[System instructions trimmed for model compatibility]"
+            print(f"DEBUG: Trimmed system message from ~{estimated_tokens} to ~2000 tokens")
+            trimmed_req['messages'] = [{"role": "system", "content": trimmed_content}] + messages[1:]
+    
+    return trimmed_req
+
 def google_to_openai_request(google_req, model):
     """Translates Google GenerateContentRequest to OpenAI ChatCompletionRequest"""
     messages = []
@@ -231,8 +279,12 @@ def generate_content(model):
         # If model already has a provider prefix (e.g., deepseek/, openai/), use it as-is
         # Otherwise, detect the provider based on model name patterns
         if '/' in model:
-            # Model already has provider prefix (e.g., "deepseek/deepseek-chat")
-            target_model = model
+            # Normalize github_copilot/ to github/ for litellm
+            if model.startswith('github_copilot/'):
+                target_model = model.replace('github_copilot/', 'github/', 1)
+            else:
+                # Model already has provider prefix (e.g., "deepseek/deepseek-chat")
+                target_model = model
         elif model.startswith('gpt-') or model.startswith('o1-'):
             # OpenAI models (gpt-4, gpt-3.5-turbo, gpt-4o-mini, o1-preview, etc.)
             target_model = f"openai/{model}"
@@ -243,6 +295,30 @@ def generate_content(model):
         openai_req = google_to_openai_request(google_req, target_model)
         save_debug_json("openai_request.json", openai_req)
         
+        # Trim payload for models with small context limits
+        openai_req = trim_payload_for_small_models(openai_req, target_model)
+        
+        # Explicitly pass API keys for providers that need them
+        # LiteLLM can use environment variables, but being explicit is more reliable
+        api_key = None
+        if target_model.startswith('github/'):
+            api_key = os.getenv('GITHUB_API_KEY')
+        elif target_model.startswith('openai/'):
+            api_key = os.getenv('OPENAI_API_KEY')
+        elif target_model.startswith('groq/'):
+            api_key = os.getenv('GROQ_API_KEY')
+        elif target_model.startswith('anthropic/'):
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+        elif target_model.startswith('deepseek/'):
+            api_key = os.getenv('DEEPSEEK_API_KEY')
+        elif target_model.startswith('together_ai/'):
+            api_key = os.getenv('TOGETHER_API_KEY')
+        elif target_model.startswith('gemini/'):
+            api_key = os.getenv('GEMINI_API_KEY')
+        
+        # Add api_key to request if found
+        if api_key:
+            openai_req['api_key'] = api_key
 
         # Check if streaming is requested
         is_streaming = 'streamGenerateContent' in request.path or request.args.get('alt') == 'sse'
